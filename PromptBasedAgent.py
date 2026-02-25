@@ -120,15 +120,17 @@ def list_drive_recipes(search: str = "") -> str:
 
 
 def get_recipe_image(file_id: str) -> str:
-    """Return a recipe image from Google Drive by its file ID.
+    """Fetch a recipe image from Google Drive.
 
-    Always call list_drive_recipes() first to find the correct file_id.
-    The UI will automatically render the image for the user.
+    CRITICAL: The tool returns a tag like [RECIPE_IMAGE:abc123].
+    You MUST paste that tag EXACTLY and VERBATIM into your reply.
+    The UI converts it into a visible image — but only if the tag
+    is present in your message. Never replace it with a description.
     """
     if not file_id.strip():
         return "No file_id provided."
-    # The Streamlit UI detects this tag and renders the image.
     return f"[RECIPE_IMAGE:{file_id.strip()}]"
+
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 def _load_system_prompt() -> str:
