@@ -23,7 +23,7 @@ def _bootstrap_env() -> None:
 _bootstrap_env()
 
 # ── 2. Import agent ───────────────────────────────────────────────────────────
-from PromptBasedRagMultimodalAgent import graph  # noqa: E402
+from PromptBasedAgent import graph  # noqa: E402
 from langchain_core.messages import HumanMessage, AIMessage  # noqa: E402
 
 # ── 3. Helpers ────────────────────────────────────────────────────────────────
