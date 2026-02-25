@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import base64
 import streamlit as st
@@ -22,20 +23,19 @@ def _bootstrap_env() -> None:
 
 _bootstrap_env()
 
-# ── 2. Import agent ───────────────────────────────────────────────────────────
-from PromptBasedAgent import graph  # noqa: E402
+# ── 2. Import agent + Drive utils ─────────────────────────────────────────────
+from PromptBasedAgent import graph          # noqa: E402
 from langchain_core.messages import HumanMessage, AIMessage  # noqa: E402
+import gdrive_utils                         # noqa: E402
 
 # ── 3. Helpers ────────────────────────────────────────────────────────────────
 def make_thread_id(seed: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
 
-
 def file_to_base64(uploaded_file) -> tuple[str, str]:
     mime_type = uploaded_file.type or "image/jpeg"
     b64 = base64.b64encode(uploaded_file.read()).decode("utf-8")
     return b64, mime_type
-
 
 def build_lc_content(text: str, image_b64: str | None, mime_type: str | None) -> str | list:
     if image_b64:
@@ -45,7 +45,6 @@ def build_lc_content(text: str, image_b64: str | None, mime_type: str | None) ->
         ]
     return text
 
-
 def run_graph(messages: list, thread_id: str) -> str:
     config = {"configurable": {"thread_id": thread_id}}
     result = graph.invoke({"messages": messages}, config=config)
@@ -54,10 +53,32 @@ def run_graph(messages: list, thread_id: str) -> str:
         return last.content
     return str(last.get("content", last))
 
-
 def render_image(b64: str, width: int = 280) -> None:
     st.image(base64.b64decode(b64), width=width)
 
+# ── 3a. Recipe-image renderer ─────────────────────────────────────────────────
+_IMAGE_TAG = re.compile(r"\[RECIPE_IMAGE:([^\]]+)\]")
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_drive_image(file_id: str) -> bytes:
+    """Download a Drive image and cache it for 5 minutes."""
+    return gdrive_utils.download_bytes(file_id)
+
+def render_response(response: str) -> None:
+    """Render an assistant response, replacing [RECIPE_IMAGE:id] tags with images."""
+    parts = _IMAGE_TAG.split(response)
+    # split() on a group alternates:  text, file_id, text, file_id, …
+    for i, part in enumerate(parts):
+        if i % 2 == 0:          # plain text segment
+            if part.strip():
+                st.markdown(part.strip())
+        else:                   # captured file_id
+            file_id = part.strip()
+            try:
+                img_bytes = _fetch_drive_image(file_id)
+                st.image(img_bytes, use_container_width=True)
+            except Exception as e:
+                st.warning(f"⚠️ Could not load recipe image ({file_id}): {e}")
 
 # ── 4. Session state ──────────────────────────────────────────────────────────
 if "session_seed" not in st.session_state:
@@ -82,11 +103,9 @@ with st.sidebar:
         st.session_state.pending_mime = None
         st.session_state.show_camera = False
         st.rerun()
-
     st.divider()
     st.subheader("📎 Attach Image")
 
-    # File upload
     uploaded = st.file_uploader(
         "Upload an image",
         type=["png", "jpg", "jpeg", "gif", "webp"],
@@ -97,7 +116,6 @@ with st.sidebar:
         st.session_state.pending_b64 = b64
         st.session_state.pending_mime = mime
 
-    # Camera toggle
     toggle_label = "📷 Close camera" if st.session_state.show_camera else "📷 Take a photo"
     if st.button(toggle_label, use_container_width=True):
         st.session_state.show_camera = not st.session_state.show_camera
@@ -112,7 +130,6 @@ with st.sidebar:
             st.session_state.show_camera = False
             st.rerun()
 
-    # Pending image preview
     if st.session_state.pending_b64:
         st.divider()
         st.caption("📌 Attached — will send with next message")
@@ -131,24 +148,24 @@ for msg in st.session_state.chat_history:
         if msg["role"] == "user" and msg.get("image_b64"):
             render_image(msg["image_b64"])
         if msg.get("content"):
-            st.markdown(msg["content"])
+            if msg["role"] == "assistant":
+                render_response(msg["content"])   # ← handles [RECIPE_IMAGE:…]
+            else:
+                st.markdown(msg["content"])
 
 # ── 8. Chat input ─────────────────────────────────────────────────────────────
 user_input = st.chat_input("Type your message…")
-
 if user_input or (st.session_state.pending_b64 and user_input is not None):
     text = user_input or ""
-    image_b64 = st.session_state.pending_b64
+    image_b64  = st.session_state.pending_b64
     image_mime = st.session_state.pending_mime
 
-    # Show user turn
     with st.chat_message("user"):
         if image_b64:
             render_image(image_b64)
         if text:
             st.markdown(text)
 
-    # Persist to history
     st.session_state.chat_history.append({
         "role": "user",
         "content": text,
@@ -156,11 +173,9 @@ if user_input or (st.session_state.pending_b64 and user_input is not None):
         "image_mime": image_mime,
     })
 
-    # Clear pending image
-    st.session_state.pending_b64 = None
+    st.session_state.pending_b64  = None
     st.session_state.pending_mime = None
 
-    # Build LangChain messages
     lc_messages = []
     for m in st.session_state.chat_history:
         if m["role"] == "user":
@@ -169,13 +184,12 @@ if user_input or (st.session_state.pending_b64 and user_input is not None):
         else:
             lc_messages.append(AIMessage(content=m["content"]))
 
-    # Run agent
     with st.chat_message("assistant"):
         with st.spinner("Thinking…"):
             try:
                 response = run_graph(lc_messages, thread_id)
             except Exception as exc:
                 response = f"⚠️ Error: {exc}"
-        st.markdown(response)
+        render_response(response)   # ← handles [RECIPE_IMAGE:…]
 
     st.session_state.chat_history.append({"role": "assistant", "content": response})
