@@ -18,17 +18,19 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
+# ── Google Drive ──────────────────────────────────────────────────────────────
+import gdrive_utils
 
 PROMPT_NAME  = "agent.prompt"
 PROMPT_PATH  = os.path.join(os.path.dirname(__file__), "prompts", PROMPT_NAME)
 RAG_DIR      = os.path.join(os.path.dirname(__file__), "rag")
 OPENAI_MODEL = "gpt-4.1-mini"
-
-# Local embedding model – downloaded once, cached in ~/.cache/huggingface
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
-# ── Build RAG index at startup ────────────────────────────────────────────────
+# Folder ID comes from env / Streamlit secrets (set GDRIVE_FOLDER_ID)
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
 
+# ── Build RAG index at startup ────────────────────────────────────────────────
 _LOADERS = {
     ".txt":  TextLoader,
     ".pdf":  PyPDFLoader,
@@ -36,7 +38,6 @@ _LOADERS = {
 }
 
 def _load_documents():
-    """Load all supported files from the rag/ folder."""
     docs = []
     rag_path = Path(RAG_DIR)
     for path in rag_path.iterdir():
@@ -46,7 +47,6 @@ def _load_documents():
         try:
             loader = loader_cls(str(path))
             loaded = loader.load()
-            # Tag each chunk with its source filename
             for doc in loaded:
                 doc.metadata.setdefault("source", path.name)
             docs.extend(loaded)
@@ -55,31 +55,24 @@ def _load_documents():
             print(f"[RAG] Warning — could not load {path.name}: {e}")
     return docs
 
-
 def _build_index():
-    """Return a FAISS retriever, or None if the rag/ folder is empty."""
     docs = _load_documents()
     if not docs:
         print("[RAG] No documents found in rag/ — retrieval tool will be disabled.")
         return None
-
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     chunks   = splitter.split_documents(docs)
-
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
     db = FAISS.from_documents(chunks, embeddings)
     print(f"[RAG] Index built: {len(chunks)} chunks from {len(docs)} document(s).")
     return db.as_retriever(search_kwargs={"k": 4})
 
-
 _retriever = _build_index()
 
-# ── Tools ─────────────────────────────────────────────────────────────────────
-
+# ── Existing tools ────────────────────────────────────────────────────────────
 def get_current_date() -> str:
     """Get today's date in ISO format."""
     return datetime.date.today().isoformat()
-
 
 def search_documents(query: str) -> str:
     """Search the internal knowledge base for information relevant to the query.
@@ -98,24 +91,63 @@ def search_documents(query: str) -> str:
     except Exception as e:
         return f"Error during document search: {e}"
 
+# ── Google Drive tools ────────────────────────────────────────────────────────
+def list_drive_recipes(search: str = "") -> str:
+    """List recipe image files available in the Google Drive recipe folder.
+
+    Optionally pass a *search* term (e.g. 'pasta', 'salad') to filter results
+    by filename. Returns file names and their Drive IDs so you can call
+    get_recipe_image() with the right ID.
+    """
+    if not GDRIVE_FOLDER_ID:
+        return "Google Drive folder is not configured (GDRIVE_FOLDER_ID missing)."
+    try:
+        files = gdrive_utils.list_image_files(GDRIVE_FOLDER_ID)
+    except Exception as e:
+        return f"Error accessing Google Drive: {e}"
+
+    if not files:
+        return "No recipe images found in the Google Drive folder."
+
+    if search:
+        term = search.lower()
+        files = [f for f in files if term in f["name"].lower()]
+        if not files:
+            return f"No recipe images matched '{search}'."
+
+    lines = [f"- {f['name']}  (id: {f['id']})" for f in files]
+    return "Available recipe images:\n" + "\n".join(lines)
+
+
+def get_recipe_image(file_id: str) -> str:
+    """Return a recipe image from Google Drive by its file ID.
+
+    Always call list_drive_recipes() first to find the correct file_id.
+    The UI will automatically render the image for the user.
+    """
+    if not file_id.strip():
+        return "No file_id provided."
+    # The Streamlit UI detects this tag and renders the image.
+    return f"[RECIPE_IMAGE:{file_id.strip()}]"
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
-
 def _load_system_prompt() -> str:
     with open(PROMPT_PATH, "r", encoding="utf-8") as f:
         return f.read().strip()
 
 base_system_prompt = _load_system_prompt()
 
-
 def prompt(state: AgentState, config: RunnableConfig) -> list[AnyMessage]:
     system_msg = base_system_prompt
     return [{"role": "system", "content": system_msg}] + state["messages"]
 
-
 # ── Graph ─────────────────────────────────────────────────────────────────────
-
-_tools = [get_current_date, search_documents]
+_tools = [
+    get_current_date,
+    search_documents,
+    list_drive_recipes,   # ← new
+    get_recipe_image,     # ← new
+]
 
 graph = create_react_agent(
     model=f"openai:{OPENAI_MODEL}",
