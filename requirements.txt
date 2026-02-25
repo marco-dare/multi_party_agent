@@ -5,6 +5,9 @@ langchain-openai
 langchain-community
 langchain-huggingface
 langgraph
+google-api-python-client
+google-auth
+google-auth-httplib2
 python-dotenv
 # Local embeddings (no API cost)
 sentence-transformers
